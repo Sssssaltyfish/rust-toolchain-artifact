@@ -39,8 +39,25 @@ def verify(data, expected):
         raise ValueError(f"SHA-256 mismatch: expected {expected}, got {actual}")
 
 
-def resolve(channel, target):
-    url = f"{DIST}/channel-rust-{channel}.toml"
+def manifest_request(channel, requested_version=""):
+    selector = requested_version.strip()
+    if not selector:
+        return f"{DIST}/channel-rust-{channel}.toml", None, None
+    if re.fullmatch(r"\d+\.\d+\.\d+", selector):
+        if channel != "stable":
+            raise ValueError("A numeric release such as 1.98.1 requires channel=stable")
+        return f"{DIST}/channel-rust-{selector}.toml", selector, None
+    dated = re.fullmatch(r"(?:(stable|beta|nightly)-)?(\d{4}-\d{2}-\d{2})", selector)
+    if not dated:
+        raise ValueError("Version must be a stable release (1.98.1) or a dated channel (nightly-2026-09-26 / YYYY-MM-DD)")
+    if dated[1] and dated[1] != channel:
+        raise ValueError(f"Version {selector} conflicts with channel={channel}")
+    datetime.strptime(dated[2], "%Y-%m-%d")
+    return f"{DIST}/{dated[2]}/channel-rust-{channel}.toml", None, dated[2]
+
+
+def resolve(channel, target, requested_version=""):
+    url, requested_release, requested_date = manifest_request(channel, requested_version)
     # The moving manifest and checksum can change between requests. Retry the pair.
     for attempt in range(3):
         raw = read_url(url)
@@ -52,7 +69,17 @@ def resolve(channel, target):
             if attempt == 2:
                 raise
             time.sleep(2)
-    return describe(channel, target, raw), raw
+    info = describe(channel, target, raw)
+    if requested_release and info['release'] != requested_release:
+        raise ValueError(f"Requested {requested_release}, received {info['release']}")
+    if requested_date and info['date'] != requested_date:
+        raise ValueError(f"Requested {requested_date}, received manifest date {info['date']}")
+    info['selection'] = 'pinned' if requested_version.strip() else 'latest'
+    info['requested_version'] = requested_version.strip()
+    info['manifest_url'] = url
+    if info['selection'] == 'pinned':
+        info['artifact_name'] = info['artifact_name'].replace('rust-', 'rust-pinned-', 1)
+    return info, raw
 
 
 def describe(channel, target, raw):
@@ -64,7 +91,7 @@ def describe(channel, target, raw):
         raise ValueError(f"Wrong release for {channel}: {release}")
     package = manifest["pkg"]["rust"]["target"][target]
     if not package["available"]:
-        raise ValueError(f"Latest {channel} has no complete distribution for {target}; refusing to fall back")
+        raise ValueError(f"Selected {channel} has no complete distribution for {target}; refusing to fall back")
     url = package["xz_url"]
     if not url.startswith(f"{DIST}/{manifest['date']}/") or not url.endswith(".tar.xz"):
         raise ValueError(f"Expected a dated official distribution URL, got {url}")
@@ -141,13 +168,24 @@ def summary(text):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--channel", choices=CHANNELS, required=True)
+    parser.add_argument("--channel", choices=(*CHANNELS, "all"), required=True)
+    parser.add_argument("--version", default="", help="Stable release or dated channel; empty selects latest")
     parser.add_argument("--target", default="x86_64-unknown-linux-gnu")
     parser.add_argument("--output-dir", type=Path, default=Path("dist"))
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--resolve-only", action="store_true")
+    parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
-    info, manifest = resolve(args.channel, args.target)
+    if args.channel == "all":
+        if args.version.strip():
+            parser.error("A pinned version requires exactly one channel; all cannot be combined with version")
+        if args.validate_only:
+            return
+        parser.error("Run each channel separately; all is handled by the Actions matrix")
+    manifest_request(args.channel, args.version)
+    if args.validate_only:
+        return
+    info, manifest = resolve(args.channel, args.target, args.version)
     print(json.dumps(info, indent=2), flush=True)
     if args.resolve_only:
         return
@@ -171,7 +209,7 @@ def main():
         with path.open("rb") as handle:
             checksums.append(f"{hashlib.file_digest(handle, 'sha256').hexdigest()}  {path.name}\n")
     (args.output_dir / "SHA256SUMS").write_text("".join(checksums))
-    output({"publish": "true", "artifact_name": info["artifact_name"], "archive": info["archive"]})
+    output({"publish": "true", "artifact_name": info["artifact_name"], "archive": info["archive"], "selection": info['selection']})
     summary(f"Verified official **{args.channel} {info['version']}**, published {info['date']}, target `{args.target}`.\n\n"
             f"Archive SHA-256: `{info['sha256']}`")
 

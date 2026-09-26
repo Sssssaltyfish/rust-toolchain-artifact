@@ -1,5 +1,5 @@
 name: Sync Rust toolchains
-run-name: Sync Rust ${{ inputs.channel || (github.event_name == 'schedule' && 'all') || 'stable' }}
+run-name: Sync Rust ${{ inputs.channel || (github.event_name == 'schedule' && 'all') || 'stable' }} — ${{ inputs.version || 'latest' }}
 
 on:
   schedule:
@@ -17,6 +17,11 @@ on:
         type: choice
         options: [stable, beta, nightly, all]
         default: stable
+      version:
+        description: 'Optional: 1.98.1, nightly-2026-09-26, beta-2026-09-20, or YYYY-MM-DD; empty = latest'
+        type: string
+        required: false
+        default: ''
       force:
         description: Upload even if an unexpired artifact already exists
         type: boolean
@@ -35,9 +40,17 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -m unittest discover -s tests -v
+      - name: Validate requested channel and version
+        env:
+          CHANNEL: ${{ inputs.channel || 'stable' }}
+          VERSION: ${{ inputs.version || '' }}
+        run: python3 scripts/sync.py --channel "$CHANNEL" --version "$VERSION" --validate-only
 
   sync:
     needs: test
+    permissions:
+      contents: read
+      actions: write
     name: Sync ${{ matrix.channel }} / Linux x86_64
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -58,8 +71,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CHANNEL: ${{ matrix.channel }}
           FORCE: ${{ inputs.force || github.event_name == 'push' }}
+          VERSION: ${{ inputs.version || '' }}
         run: |
-          args=(--channel "$CHANNEL")
+          args=(--channel "$CHANNEL" --version "$VERSION")
           if [[ "$FORCE" == true ]]; then args+=(--force); fi
           python3 scripts/sync.py "${args[@]}"
       - name: Install and smoke test the verified toolchain
@@ -99,3 +113,14 @@ jobs:
         env:
           ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
         run: echo "[Download verified toolchain artifact]($ARTIFACT_URL)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Bound storage after successful publication
+        if: steps.sync.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ matrix.channel }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          SELECTION: ${{ steps.sync.outputs.selection }}
+        run: |
+          keep=2
+          if [[ "$SELECTION" == pinned ]]; then keep=1; fi
+          python3 scripts/prune.py --channel "$CHANNEL" --current-id "$ARTIFACT_ID" --selection "$SELECTION" --keep "$keep"

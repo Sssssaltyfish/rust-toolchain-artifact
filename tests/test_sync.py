@@ -23,6 +23,41 @@ xz_hash = "{'a' * 64}"
 
 
 class ChannelTests(unittest.TestCase):
+    def test_requested_version_selects_immutable_manifest(self):
+        cases = [
+            ('stable', '1.98.1', 'channel-rust-1.98.1.toml'),
+            ('stable', '2026-09-03', '2026-09-03/channel-rust-stable.toml'),
+            ('beta', 'beta-2026-09-20', '2026-09-20/channel-rust-beta.toml'),
+            ('nightly', 'nightly-2026-09-26', '2026-09-26/channel-rust-nightly.toml'),
+            ('nightly', '2026-09-26', '2026-09-26/channel-rust-nightly.toml'),
+        ]
+        for channel, version, path in cases:
+            with self.subTest(channel=channel, version=version):
+                self.assertEqual(sync.manifest_request(channel, version)[0], f'{sync.DIST}/{path}')
+
+    def test_invalid_or_conflicting_version_fails_before_network(self):
+        for channel, selector in [('stable', 'nightly-2026-09-26'), ('nightly', '1.98.1'),
+                                  ('beta', '../stable'), ('stable', '2026-02-30'),
+                                  ('beta', '1.99.0-beta.7'), ('stable', '$(id)')]:
+            with self.subTest(channel=channel, selector=selector), self.assertRaises(ValueError):
+                sync.manifest_request(channel, selector)
+
+    def test_pinned_artifact_is_isolated_and_version_checked(self):
+        raw = manifest('1.98.1')
+        checksum = hashlib.sha256(raw).hexdigest().encode()
+        with patch.object(sync, 'read_url', side_effect=[raw, checksum]):
+            info, _ = sync.resolve('stable', 'x86_64-unknown-linux-gnu', '1.98.1')
+        self.assertTrue(info['artifact_name'].startswith('rust-pinned-stable-'))
+        self.assertEqual(info['selection'], 'pinned')
+        with patch.object(sync, 'read_url', side_effect=[raw, checksum]), self.assertRaises(ValueError):
+            sync.resolve('stable', 'x86_64-unknown-linux-gnu', '1.97.0')
+
+    def test_wrong_snapshot_date_is_rejected(self):
+        raw = manifest('1.100.0-nightly')
+        checksum = hashlib.sha256(raw).hexdigest().encode()
+        with patch.object(sync, 'read_url', side_effect=[raw, checksum]), self.assertRaises(ValueError):
+            sync.resolve('nightly', 'x86_64-unknown-linux-gnu', 'nightly-2026-09-25')
+
     def test_channel_identity_is_preserved(self):
         names = set()
         for channel, version in [('stable', '1.98.1'), ('beta', '1.99.0-beta.7'), ('nightly', '1.100.0-nightly')]:

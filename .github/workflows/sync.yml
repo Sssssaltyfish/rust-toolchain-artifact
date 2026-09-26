@@ -1,0 +1,101 @@
+name: Sync Rust toolchains
+run-name: Sync Rust ${{ inputs.channel || (github.event_name == 'schedule' && 'all') || 'stable' }}
+
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/sync.yml'
+      - 'scripts/**'
+      - 'tests/**'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Official release channel
+        type: choice
+        options: [stable, beta, nightly, all]
+        default: stable
+      force:
+        description: Upload even if an unexpired artifact already exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -v
+
+  sync:
+    needs: test
+    name: Sync ${{ matrix.channel }} / Linux x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: ${{ fromJSON((github.event_name == 'schedule' || inputs.channel == 'all') && '["stable","beta","nightly"]' || format('["{0}"]', inputs.channel || 'stable')) }}
+    concurrency:
+      group: rust-toolchain-${{ matrix.channel }}-x86_64-unknown-linux-gnu
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Resolve channel and verify official archive
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ matrix.channel }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          args=(--channel "$CHANNEL")
+          if [[ "$FORCE" == true ]]; then args+=(--force); fi
+          python3 scripts/sync.py "${args[@]}"
+      - name: Install and smoke test the verified toolchain
+        if: steps.sync.outputs.publish == 'true'
+        env:
+          ARCHIVE: ${{ steps.sync.outputs.archive }}
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          mkdir -p "$RUNNER_TEMP/rust-installer" "$RUNNER_TEMP/rust-smoke"
+          tar -xJf "$ARCHIVE" -C "$RUNNER_TEMP/rust-installer"
+          installer="$RUNNER_TEMP/rust-installer/${ARCHIVE%.tar.xz}"
+          bash "$installer/install.sh" --prefix="$RUNNER_TEMP/rust-smoke" --disable-ldconfig --components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu
+          export PATH="$RUNNER_TEMP/rust-smoke/bin:$PATH"
+          rustc --version --verbose
+          cargo --version
+          python3 - <<'PY'
+          import json, subprocess
+          expected = 'rustc ' + json.load(open('metadata.json'))['rustc_version']
+          actual = subprocess.check_output(['rustc', '--version'], text=True).strip()
+          assert actual == expected, (actual, expected)
+          PY
+          cargo new --vcs none "$RUNNER_TEMP/rust-smoke-project"
+          cargo run --offline --manifest-path "$RUNNER_TEMP/rust-smoke-project/Cargo.toml"
+      - name: Publish Actions artifact
+        if: steps.sync.outputs.publish == 'true'
+        id: artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.sync.outputs.artifact_name }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Record download link
+        if: steps.sync.outputs.publish == 'true'
+        env:
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        run: echo "[Download verified toolchain artifact]($ARTIFACT_URL)" >> "$GITHUB_STEP_SUMMARY"

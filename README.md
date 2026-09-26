@@ -15,10 +15,10 @@
 | nightly | https://static.rust-lang.org/dist/channel-rust-nightly.toml |
 
 - 每天 **07:23 UTC / 北京时间 15:23** 检查所有频道。GitHub 定时任务可能延迟。
-- 修改同步脚本、测试或工作流并推送到默认分支 `master` 时，检查 stable。
+- 修改同步脚本、测试或工作流并推送到默认分支 `master` 时，强制验证并重新上传 stable，让代码和保存策略的修改立即生效。
 - Actions → **Sync Rust toolchains** → **Run workflow** 可选择 `stable`、`beta`、`nightly` 或 `all`。`force` 可强制重新上传。
 - 已有相同频道、版本、日期、manifest 的有效 artifact 时跳过；剩余保存期不超过 7 天时重新上传，以使长期不变的 stable 仍有可用下载。
-- 每份 artifact 保存 **30 天**，不创建 GitHub Release。仓库设置可能进一步限制保存期。公开仓库连续 60 天没有仓库活动时，GitHub 可能禁用定时工作流，需要在 Actions 中重新启用。
+- 每份 artifact 保存 **90 天**（公开仓库允许的上限），不创建 GitHub Release。仓库设置可能进一步限制保存期；保存期修改只影响新上传的 artifact。公开仓库连续 60 天没有仓库活动时，GitHub 可能禁用定时工作流，需要在 Actions 中重新启用。
 
 ## 产物内容与校验
 

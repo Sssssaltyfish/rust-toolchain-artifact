@@ -57,7 +57,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CHANNEL: ${{ matrix.channel }}
-          FORCE: ${{ inputs.force || false }}
+          FORCE: ${{ inputs.force || github.event_name == 'push' }}
         run: |
           args=(--channel "$CHANNEL")
           if [[ "$FORCE" == true ]]; then args+=(--force); fi
@@ -93,7 +93,7 @@ jobs:
           path: dist/*
           if-no-files-found: error
           compression-level: 0
-          retention-days: 30
+          retention-days: 90
       - name: Record download link
         if: steps.sync.outputs.publish == 'true'
         env:
